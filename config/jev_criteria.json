@@ -1,0 +1,24 @@
+{
+  "instructions": "O estado traz o brain (regras em Markdown) e o grupo de pernas com os números já calculados. Siga o brain: escolha a forma pelo arquivo 02 e, para 2 opções em lados opostos com strikes diferentes, aplique a tabela R1-R8 do arquivo 03 sobre teste_hedge. Não refaça contas e não invente campos. Responda Ambiguous quando a regra do brain mandar.",
+  "criteria": {
+    "Opção única": "n_opt = 1.",
+    "Straddle": "2 opções, lados opostos, mesmo strike, mesmo vencimento.",
+    "Strangle": "2 opções em lados opostos, strikes diferentes, mesmo vencimento, e o hedge bate com a previsão de mesma direção (03/R5).",
+    "Risk reversal": "2 opções em lados opostos, strikes diferentes, mesmo vencimento, e o hedge bate com a soma dos deltas (03/R4).",
+    "Collar": "Risk reversal cujo hedge bate com o notional cheio das opções (03/R7).",
+    "Spread vertical": "2 opções do mesmo lado, strikes diferentes, mesmo vencimento.",
+    "Calendar spread": "2 opções do mesmo lado, mesmo strike, vencimentos diferentes.",
+    "Spread diagonal": "2 opções do mesmo lado, strike e vencimento diferentes.",
+    "Fracionamento de notional": "A mesma opção repetida (mesmo lado, strike e vencimento). Não é estrutura.",
+    "Lados opostos, vencimentos diferentes": "2 opções em lados opostos com vencimentos diferentes; forma sem nome de mercado.",
+    "Seagull": "3 opções, 2 lados, 3 strikes distintos, mesmo vencimento.",
+    "Strip/Strap": "3 opções, 2 lados, mesmo strike e vencimento (straddle 2:1).",
+    "Ratio spread": "3 ou 4 opções do mesmo lado em 2 strikes com quantidades desiguais.",
+    "Iron condor": "4 opções, 2 de cada lado.",
+    "Butterfly": "4 opções do mesmo lado em 3 strikes, com o strike do meio repetido.",
+    "Condor": "4 opções do mesmo lado em 4 strikes.",
+    "Programa de hedge": "6 ou mais opções, um par por vencimento, até 3 strikes.",
+    "Não identificado": "Qualquer forma fora da lista.",
+    "Ambiguous": "O dado não permite decidir: teste do hedge ausente, deltas pequenos ou hedge não explicado (03/R1, R2, R3, R6, R8)."
+  }
+}

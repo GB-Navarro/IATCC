@@ -1,0 +1,6 @@
+# Números ficam fora do brain para manter a decisão reproduzível.
+tau_res = 0.05
+tau_sep = 0.05
+min_t_days = 2
+min_forward_strike_ratio = 0.7
+max_forward_strike_ratio = 1.4

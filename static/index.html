@@ -1,0 +1,255 @@
+<!doctype html>
+<!--
+  Esta página é a interface operacional do MVP (seção 10). Ela consulta a API
+  web Rust, lista grupos, exibe pernas, teste do hedge, resposta da IA e regra
+  do código, e dispara classificações; é a camada visual sobre db.rs, ia.rs e
+  os handlers de web.rs.
+-->
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DTCC FX OPTIONS</title>
+  <style>
+    /* Paleta e densidade do terminal Bloomberg descritas na seção 10.2 do MVP. */
+    :root { --amber:#ffa028; --muted:#c8c8c8; --blue:#1e3a6e; --yellow:#ffd400; --line:#333; --cyan:#4fc3f7; --gray:#8a8a8a; --red:#ff4d4d; }
+    * { box-sizing:border-box; border-radius:0; box-shadow:none; }
+    html, body { height:100%; }
+    body { margin:0; background:#000; color:var(--amber); font:13px "IBM Plex Mono",Consolas,monospace; display:flex; flex-direction:column; }
+    header { padding:4px 10px; background:var(--blue); color:#fff; display:flex; justify-content:space-between; gap:12px; text-transform:uppercase; white-space:nowrap; overflow:hidden; }
+    .command { display:flex; align-items:center; gap:6px; padding:4px 10px; border-bottom:1px solid var(--line); }
+    .command span { color:var(--muted); }
+    input { flex:1; background:#000; color:var(--amber); border:0; outline:0; padding:3px 0; font:inherit; text-transform:uppercase; }
+    main { flex:1; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); min-height:0; }
+    section { min-width:0; overflow:auto; border-right:1px solid var(--line); }
+    section:last-child { border:0; padding:6px 10px; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; padding:2px 6px; border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    th { color:#fff; position:sticky; top:0; background:#000; text-transform:uppercase; }
+    td.n { text-align:right; }
+    tr.row { cursor:pointer; }
+    tr.selected { background:var(--blue); color:#fff; }
+    h3 { margin:2px 0 6px; color:#fff; font-size:13px; text-transform:uppercase; }
+    .panel { border-top:1px solid var(--line); margin-top:6px; padding-top:4px; }
+    .panel b { color:#fff; text-transform:uppercase; }
+    .muted { color:var(--muted); } .gray { color:var(--gray); } .cyan { color:var(--cyan); }
+    .ambiguous { color:var(--yellow); } .bad { color:var(--red); } .good { color:var(--amber); }
+    .leg { white-space:pre; }
+    .kv { display:grid; grid-template-columns:repeat(4, max-content); gap:1px 14px; }
+    pre { white-space:pre-wrap; word-break:break-word; color:var(--muted); margin:4px 0; }
+    #status { padding:3px 10px; border-top:1px solid var(--line); color:var(--muted); min-height:22px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    footer { padding:3px 10px; display:flex; gap:14px; background:#000; border-top:1px solid var(--line); }
+    footer span { background:var(--yellow); color:#000; padding:1px 6px; cursor:pointer; }
+    footer .spacer { flex:1; background:none; cursor:default; }
+    #brainPanel { display:none; }
+    body.brain #brainPanel { display:block; } body.brain #detail { display:none; }
+    @media (max-width:900px) { main { grid-template-columns:1fr; } section { border-right:0; border-bottom:1px solid var(--line); max-height:50vh; } }
+  </style>
+</head>
+<body>
+  <header><span id="title">DTCC FX OPTIONS</span><span id="clock"></span></header>
+  <div class="command"><span>&gt;</span><input id="filter" placeholder="PAR OU ESTRUTURA  &lt;GO&gt;" autocomplete="off" spellcheck="false"></div>
+  <main>
+    <section>
+      <table>
+        <thead><tr><th>HORA</th><th>PLAT</th><th>PAR</th><th>OPT</th><th>HDG</th><th>CÓDIGO</th><th>IA</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+    <section>
+      <div id="detail" class="muted">SELECIONE UM GRUPO.</div>
+      <div id="brainPanel"><h3 id="brainTitle">BRAIN</h3><pre id="brain"></pre></div>
+    </section>
+  </main>
+  <div id="status"></div>
+  <footer>
+    <span data-key="F1">F1 GRUPOS</span><span data-key="F2">F2 BRAIN</span><span data-key="F8">F8 CLASSIFICAR</span><span data-key="F9">F9 CLASSIFICAR TODOS</span><span class="spacer"></span><span data-key="Escape">ESC LIMPAR FILTRO</span>
+  </footer>
+<script>
+  // Estado da tela: grupos listados, índice selecionado, lista de estruturas e lote em andamento.
+  let groups = [], index = -1, estruturas = [], lote = null;
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const norm = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
+  const NAO_ESTRUTURA = ['Opção única', 'Fracionamento de notional', 'Não identificado'];
+  const status = (text, cls = 'muted') => { $('status').className = cls; $('status').textContent = text; };
+  const clock = () => $('clock').textContent = new Date().toISOString().slice(11, 19) + ' UTC';
+  setInterval(clock, 1000); clock();
+
+  function classe(estrutura) {
+    // Cor por tipo de resposta, como na tabela 10.2.
+    if (!estrutura) return 'muted';
+    if (estrutura === 'Ambiguous') return 'ambiguous';
+    return NAO_ESTRUTURA.includes(estrutura) ? 'gray' : 'good';
+  }
+  function fmtNotional(v) {
+    if (v == null) return '—';
+    const a = Math.abs(v);
+    if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+    if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+    return String(v);
+  }
+  const num = (v, d = 4) => v == null ? '—' : Number(v).toFixed(d);
+  async function api(path, options) {
+    // Erros da API viram exceção com a mensagem do servidor.
+    const response = await fetch(path, options);
+    const text = await response.text();
+    if (!response.ok) throw new Error(text || response.statusText);
+    return JSON.parse(text);
+  }
+
+  async function loadInfo() {
+    try {
+      const info = await api('/api/info');
+      estruturas = info.estruturas;
+      const r = info.resumo, a = r.amostra;
+      const dia = s => s.slice(0, 10), hora = s => s.slice(11, 16);
+      const janela = !a.inicio ? '—' : dia(a.inicio) === dia(a.fim)
+        ? `${dia(a.inicio)} ${hora(a.inicio)}–${hora(a.fim)} UTC`
+        : `${dia(a.inicio)} ${hora(a.inicio)} – ${dia(a.fim)} ${hora(a.fim)} UTC`;
+      $('title').textContent = `DTCC FX OPTIONS · AMOSTRA ${janela} · ${r.total_grupos} GRUPOS · IA ${r.classificados} · CONCORDAM ${r.concordam_com_regra_codigo} · ${info.provider}`;
+    } catch (error) { status(error.message, 'bad'); }
+  }
+
+  async function load() {
+    // Busca grupos com o filtro atual (par ou estrutura) e reconstrói a lista.
+    const query = $('filter').value.trim();
+    const estrutura = estruturas.find(e => norm(e) === norm(query));
+    const params = new URLSearchParams();
+    if (estrutura) params.set('estrutura', estrutura); else if (query) params.set('par', query);
+    const selectedId = groups[index]?.id;
+    try { groups = await api('/api/grupos?' + params); } catch (error) { groups = []; status(error.message, 'bad'); }
+    $('rows').innerHTML = groups.map((g, i) => {
+      const ia = g.classificacao?.estrutura;
+      const iaClass = ia && g.concorda === false ? 'bad' : classe(ia);
+      return `<tr class="row" data-i="${i}"><td>${esc(g.timestamp.slice(11, 19))}</td><td>${esc(g.platform_identifier)}</td><td>${esc(g.par)}</td>` +
+        `<td class="n">${g.n_opt}</td><td class="n ${g.n_hedge ? 'cyan' : ''}">${g.n_hedge}</td>` +
+        `<td class="${classe(g.regra_codigo)}">${esc(g.regra_codigo.toUpperCase())}</td><td class="${iaClass}">${esc(ia ? ia.toUpperCase() : '—')}</td></tr>`;
+    }).join('');
+    document.querySelectorAll('#rows tr').forEach(row => row.onclick = () => select(Number(row.dataset.i), true));
+    const keep = groups.findIndex(g => g.id === selectedId);
+    select(keep >= 0 ? keep : (groups.length ? 0 : -1), true);
+    if (!lote) status(`${groups.length} GRUPO(S)${query ? ' · FILTRO ' + query.toUpperCase() : ''}`);
+  }
+
+  function select(i, open) {
+    index = i;
+    document.querySelectorAll('#rows tr').forEach(row => row.classList.toggle('selected', Number(row.dataset.i) === i));
+    document.querySelector('#rows tr.selected')?.scrollIntoView({block: 'nearest'});
+    if (open) render();
+  }
+
+  function legLine(p) {
+    // Opções: família, call/put da moeda-base, strike, notional, vencimento. Hedges em ciano.
+    const n = `${fmtNotional(p.notional)}${p.capado ? '+' : ''} ${p.notional_currency ?? ''}`;
+    if (p.familia === 'NDF' || p.familia === 'Forward') {
+      return `<div class="leg cyan">${esc((p.familia === 'NDF' ? 'NDF' : 'FWD').padEnd(4))} ${esc(''.padEnd(14))} ${esc(n.padEnd(14))} ${esc((p.vencimento ?? '').padEnd(10))} @${esc(p.exchange_rate ?? '—')}${p.package_indicator ? ' PKG' : ''}</div>`;
+    }
+    const fam = p.familia === 'Opção NDO' ? 'NDO' : p.familia === 'Opção vanilla' ? 'VAN' : 'EXO';
+    const lado = p.base_ccy && p.call_ccy ? `${p.call_ccy === p.base_ccy ? 'CALL' : 'PUT'} ${p.base_ccy}` : `CALL ${p.call_ccy ?? '?'}`;
+    return `<div class="leg">${esc(fam.padEnd(4))} ${esc(lado.padEnd(8))} ${esc(String(p.strike ?? '—').padEnd(9))} ${esc(n.padEnd(14))} ${esc(p.vencimento ?? '')}${p.package_indicator ? ' PKG' : ''}</div>`;
+  }
+
+  async function render() {
+    // Detalhe do grupo selecionado: pernas, teste do hedge, IA e regra do código.
+    document.body.classList.remove('brain');
+    const g0 = groups[index];
+    if (!g0) { $('detail').innerHTML = 'SELECIONE UM GRUPO.'; return; }
+    let data;
+    try { data = await api('/api/grupos/' + encodeURIComponent(g0.id)); } catch (error) { $('detail').textContent = error.message; return; }
+    if (groups[index]?.id !== g0.id) return;
+    const g = data.grupo, c = data.classificacao, f = g.features, t = f.teste_hedge;
+    const teste = t
+      ? `<div class="kv"><span>res_mesma</span><span>${num(t.res_mesma)}</span><span>res_opostas</span><span>${num(t.res_opostas)}</span>` +
+        `<span>res_cheio</span><span>${num(t.res_cheio)}</span><span>sep</span><span>${num(t.sep)}</span>` +
+        `<span>sep_cheio</span><span>${num(t.sep_cheio)}</span><span>tau_res / sep</span><span>${t.tau_res} / ${t.tau_sep}</span>` +
+        `<span>Δ call / put</span><span>${num(t.delta_call, 3)} / ${num(t.delta_put, 3)}</span><span>σ call / put</span><span>${num(t.sigma_call, 3)} / ${num(t.sigma_put, 3)}</span>` +
+        `<span>F (${esc(t.moeda_base)})</span><span>${num(t.forward)}</span><span>H / N</span><span>${fmtNotional(t.hedge_notional)} / ${fmtNotional(t.notional_call + t.notional_put)}</span></div>`
+      : `<div class="muted">AUSENTE: ${esc(f.motivo_teste_hedge ?? '—')}</div>`;
+    const ia = c
+      ? `<div class="${classe(c.estrutura)}">IA: ${esc(c.estrutura.toUpperCase())} (${esc(c.regra)})  CONF: ${esc(c.confianca.toUpperCase())}` +
+        `${c.alternativas?.length ? '  ALT: ' + esc(c.alternativas.join(', ').toUpperCase()) : ''}</div><pre>"${esc(c.justificativa)}"</pre>`
+      : `<div class="muted">IA: — SEM CLASSIFICAÇÃO (F8)</div>`;
+    const marca = !c ? '' : c.estrutura === g.regra_codigo ? '<span class="good">✓ CONCORDA</span>' : '<span class="bad">✗ DISCORDA</span>';
+    const historico = data.historico.length > 1
+      ? `<div class="panel"><b>HISTÓRICO</b>${data.historico.map(h => `<div class="muted">${esc(h.criado_em.slice(0, 19))} ${esc(h.provider)}/${esc(h.modelo)} brain ${esc(h.brain_hash.slice(0, 8))} → ${esc(h.resposta.estrutura ?? '')}</div>`).join('')}</div>`
+      : '';
+    $('detail').innerHTML =
+      `<h3>GRUPO ${esc(g.timestamp.slice(11, 19))} ${esc(g.platform_identifier)} ${esc(g.par)}</h3>` +
+      `<div class="muted">${esc(g.id)} · ${f.n_opt} OPT · ${f.n_hedge} HDG · ${f.n_strikes} STRIKES · ${f.n_vencimentos} VENC · ${f.n_lados} LADOS</div>` +
+      `<div class="panel"><b>PERNAS</b>${g.pernas.map(legLine).join('')}</div>` +
+      `<div class="panel"><b>TESTE DO HEDGE</b>${teste}</div>` +
+      `<div class="panel">${ia}<div>CÓDIGO: <span class="${classe(g.regra_codigo)}">${esc(g.regra_codigo.toUpperCase())}</span> (${esc(g.regra_codigo_ref)}) ${marca}</div></div>` +
+      historico;
+  }
+
+  async function classify(id) {
+    // Classifica um grupo; o erro do servidor (ex.: chave ausente) aparece na linha de status.
+    status(`CLASSIFICANDO ${id} ...`);
+    const result = await api('/api/grupos/' + encodeURIComponent(id) + '/classificar', {method: 'POST'});
+    status(`${id}: ${result.estrutura.toUpperCase()} (${result.regra})`, classe(result.estrutura));
+    return result;
+  }
+
+  async function classifySelected() {
+    const g = groups[index];
+    if (!g || lote) return;
+    try { await classify(g.id); await loadInfo(); await load(); } catch (error) { status(error.message, 'bad'); }
+  }
+
+  async function classifyAll() {
+    // F9: classifica em sequência os grupos listados ainda sem resposta da IA. ESC cancela.
+    if (lote) return;
+    const pendentes = groups.filter(g => !g.classificacao).map(g => g.id);
+    if (!pendentes.length) { status('NENHUM GRUPO PENDENTE NA LISTA'); return; }
+    if (!confirm(`Classificar ${pendentes.length} grupo(s) com a IA? Cada chamada tem custo.`)) return;
+    lote = {cancelado: false};
+    let feitos = 0;
+    try {
+      for (const id of pendentes) {
+        if (lote.cancelado) break;
+        status(`F9 ${feitos + 1}/${pendentes.length} · ${id}`);
+        await classify(id);
+        feitos++;
+      }
+      status(`F9: ${feitos}/${pendentes.length} CLASSIFICADO(S)${lote.cancelado ? ' · CANCELADO' : ''}`);
+    } catch (error) {
+      status(`F9 PARADO EM ${feitos}/${pendentes.length}: ${error.message}`, 'bad');
+    } finally {
+      lote = null; await loadInfo(); await load();
+    }
+  }
+
+  async function toggleBrain() {
+    if (document.body.classList.toggle('brain')) {
+      try {
+        const data = await api('/api/brain');
+        $('brainTitle').textContent = `BRAIN · SHA-256 ${data.hash.slice(0, 12)}`;
+        $('brain').textContent = data.brain;
+      } catch (error) { $('brain').textContent = error.message; }
+    } else { render(); }
+  }
+
+  function key(k, event) {
+    const typing = document.activeElement === $('filter');
+    if (k === 'F1') { $('filter').blur(); document.body.classList.remove('brain'); select(index < 0 ? 0 : index, true); }
+    else if (k === 'F2') toggleBrain();
+    else if (k === 'F8') classifySelected();
+    else if (k === 'F9') classifyAll();
+    else if (k === 'Escape') { if (lote) lote.cancelado = true; else { $('filter').value = ''; load(); } }
+    else if (k === 'Enter' && typing) load();
+    else if (k === 'Enter') render();
+    else if (k === 'ArrowDown' && groups.length) select(Math.min(index + 1, groups.length - 1), false);
+    else if (k === 'ArrowUp' && groups.length) select(Math.max(index - 1, 0), false);
+    else return;
+    event?.preventDefault();
+  }
+  document.addEventListener('keydown', e => key(e.key, e));
+  document.querySelectorAll('footer span[data-key]').forEach(b => b.onclick = () => key(b.dataset.key));
+  // Um filtro inicial pode vir na URL: /#BRL ou /#RISK%20REVERSAL.
+  $('filter').value = decodeURIComponent(location.hash.slice(1));
+  loadInfo().then(load);
+</script>
+</body>
+</html>
